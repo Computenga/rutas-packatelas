@@ -155,7 +155,16 @@ details.route li span{color:var(--muted)}
         <div><label>Ajuste de tiempo</label><input type="number" id="adj" step="0.05" min="0.3" value="1"></div>
       </div>
       <div class="hint" id="factorHint">Sin key se usa el factor (OSRM calcula sin tráfico). Con key, TomTom mide el tráfico real y el factor se recalibra solo y se recuerda por hora. “Ajuste” multiplica todos los tiempos de manejo (ej. 0.85 si las motos van más rápido que lo calculado).</div>
-      <label class="check"><input type="checkbox" id="qr" checked>QR de Google Maps en cada parada del ticket</label>
+    </div>
+
+    <div class="card">
+      <h2>Impresión (térmica 80 mm)</h2>
+      <div class="row">
+        <div><label>Ancho imprimible (mm)</label><input type="number" id="pw" min="40" max="80" step="1" value="72"></div>
+        <div><label>Tamaño de letra</label><select id="fs"><option value="1">Normal</option><option value="1.15" selected>Grande</option><option value="1.3">Muy grande</option></select></div>
+      </div>
+      <label class="check"><input type="checkbox" id="qr" checked>QR de Google Maps en cada parada</label>
+      <div class="hint">Si el ticket sale cortado del lado derecho baja el ancho a 70 o 68. Recomendado: botón “Imprimir” (directo desde el navegador) en lugar del PDF.</div>
     </div>
 
     <div class="card">
@@ -278,7 +287,7 @@ function localSearch(routes,durs,T,svc,cost,deadline){
 function solve(T,svc,nodes,K,L,ms,seed){
   const t0=Date.now(),deadline=t0+ms;const rnd=mulberry32(seed||12345);
   if(!nodes.length)return{routes:[],durs:[],iters:0};
-  const PEN=40,BAL=0.6;const cost=function(d){const o=d>L?d-L:0;return d+PEN*o+20*o*o/L+BAL*d*d/L;};
+  const PEN=40,BAL=4;const cost=function(d){const o=d>L?d-L:0;const r=d/L;return d+PEN*o+20*o*o/L+BAL*L*r*r*r*r*r*r;};
   K=Math.max(1,Math.min(K,nodes.length));
   const sym=function(a,b){return(T[a][b]+T[b][a])/2;};
   const seeds=[],isSeed=new Set(),minD=new Map();
@@ -289,6 +298,8 @@ function solve(T,svc,nodes,K,L,ms,seed){
   regretInsert(routes,durs,nodes.filter(function(x){return!isSeed.has(x);}),T,svc,cost);
   localSearch(routes,durs,T,svc,cost,deadline+ms);
   const tot=function(D){let s=0;for(const d of D)s+=cost(d);return s;};
+  const mx=function(D){let m=0;for(const d of D)if(d>m)m=d;return m;};
+  const better=function(D,C,bD,bC){const a=mx(D),b=mx(bD);if(a<b-30)return true;if(a>b+30)return false;return C<bC-1e-6;};
   let cur={routes:routes.map(function(r){return r.slice();}),durs:durs.slice()},curC=tot(durs);
   let best={routes:cur.routes.map(function(r){return r.slice();}),durs:cur.durs.slice()},bestC=curC,iters=0;
   while(Date.now()<deadline){
@@ -310,7 +321,7 @@ function solve(T,svc,nodes,K,L,ms,seed){
     localSearch(R,D,T,svc,cost,deadline+ms*0.25);
     const C=tot(D);const frac=Math.min(1,(Date.now()-t0)/ms);
     if(C<curC*(1+0.01*(1-frac))){cur={routes:R,durs:D};curC=C;}
-    if(C<bestC-1e-6){best={routes:R.map(function(r){return r.slice();}),durs:D.slice()};bestC=C;}
+    if(better(D,C,best.durs,bestC)){best={routes:R.map(function(r){return r.slice();}),durs:D.slice()};bestC=C;}
   }
   best.durs=best.routes.map(function(r){return routeDur(r,T,svc);});
   best.iters=iters;
@@ -365,9 +376,9 @@ function readCfg(){
   const date=$('date').value;const start=new Date(`${date}T${$('tStart').value}:00`),end=new Date(`${date}T${$('tEnd').value}:00`);
   return{date,start,end,K:Math.max(1,parseInt($('drivers').value)||1),wait:Math.max(0,parseFloat($('wait').value)||0),extra:Math.max(0,parseFloat($('extra').value)||0),
     group:$('group').checked,factor:parseFloat($('factor').value)||1.5,adj:parseFloat($('adj').value)||1,ttKey:$('ttKey').value.trim(),ttMode:$('ttMode').value,
-    ms:parseInt($('quality').value)||4000,qr:$('qr').checked,skipDone:$('skipDone').checked,depot:{lat:parseFloat($('dLat').value),lng:parseFloat($('dLng').value)}};
+    ms:parseInt($('quality').value)||4000,qr:$('qr').checked,pw:Math.min(80,Math.max(40,parseFloat($('pw').value)||72)),fs:parseFloat($('fs').value)||1.15,skipDone:$('skipDone').checked,depot:{lat:parseFloat($('dLat').value),lng:parseFloat($('dLng').value)}};
 }
-const PERSIST=['tStart','tEnd','drivers','wait','extra','ttKey','ttMode','adj','quality'];
+const PERSIST=['tStart','tEnd','drivers','wait','extra','ttKey','ttMode','adj','quality','pw','fs'];
 function loadSettings(){
   PERSIST.forEach(id=>{const v=store.get('f.'+id,null);if(v!==null)$(id).value=v;});
   ['group','qr','skipDone'].forEach(id=>{const v=store.get('f.'+id,null);if(v!==null)$(id).checked=v;});
@@ -686,7 +697,7 @@ async function optimize(){
     }
 
     let fewer=null;
-    if(feasibleK&&K>1){
+    if(false){
       const sumK=dK.reduce((a,b)=>a+b,0);
       for(let k=K-1;k>=Math.max(1,Math.ceil(sumK/limit))&&K-k<=4;k--){
         setStatus(`Revisando si alcanzan ${k} repartidores…`);
@@ -733,10 +744,10 @@ function renderResult(){
     <div class="chip"><small>Km totales</small><strong>${Math.round(sched.reduce((a,s)=>a+s.km,0))}</strong></div>
   </div>
   <div class="hint" style="margin-bottom:8px">Tiempos: ${esc(R.trafficSrc)}</div>
-  <div class="btns" style="margin-bottom:10px"><button id="pdfAll">PDF tickets 80 mm (todas)</button><button id="xlsOut">Excel de rutas</button></div>
-  <div class="tblwrap"><table class="tbl"><thead><tr><th>Ruta</th><th>Paradas</th><th>Envíos</th><th>Km</th><th>Salida</th><th>Termina</th><th>Holgura</th><th>Estado</th><th></th></tr></thead><tbody>`;
+  <div class="btns" style="margin-bottom:10px"><button id="printAll">Imprimir tickets (todas)</button><button id="pdfAll">PDF 80 mm (todas)</button><button id="xlsOut">Excel de rutas</button></div>
+  <div class="tblwrap"><table class="tbl"><thead><tr><th>Ruta</th><th>Paradas</th><th>Envíos</th><th>Km</th><th>Salida</th><th>Termina</th><th>Holgura</th><th>Estado</th><th>Tel. repartidor</th><th></th></tr></thead><tbody>`;
   sched.forEach((s,i)=>{const ok=s.slackMin>=-0.5;
-    h+=`<tr data-i="${i}"><td><span class="dot" style="background:${s.color}"></span>Ruta ${s.num}</td><td>${s.stops.length}</td><td>${s.parcels}</td><td>${s.km.toFixed(1)}</td><td>${hhmm(s.start)}</td><td>${hhmm(s.end)}</td><td>${Math.round(s.slackMin)} min</td><td class="${ok?'st-ok':'st-bad'}">${ok?'A tiempo':'Tarde'}</td><td><button data-pdf="${i}">PDF</button></td></tr>`;});
+    h+=`<tr data-i="${i}"><td><span class="dot" style="background:${s.color}"></span>Ruta ${s.num}</td><td>${s.stops.length}</td><td>${s.parcels}</td><td>${s.km.toFixed(1)}</td><td>${hhmm(s.start)}</td><td>${hhmm(s.end)}</td><td>${Math.round(s.slackMin)} min</td><td class="${ok?'st-ok':'st-bad'}">${ok?'A tiempo':'Tarde'}</td><td><input class="tel" data-tel="${i}" type="tel" placeholder="55…" style="width:110px;padding:5px"></td><td style="display:flex;gap:4px"><button data-print="${i}">Imprimir</button><button data-pdf="${i}">PDF</button><button data-wa="${i}" style="background:#25D366;border-color:#25D366;color:#fff">WhatsApp</button><button data-copy="${i}">Copiar</button></td></tr>`;});
   h+=`</tbody></table></div>`;
   sched.forEach((s,i)=>{
     h+=`<details class="route" id="det${i}"><summary><span class="dot" style="background:${s.color}"></span>Ruta ${s.num} · ${s.stops.length} paradas · ${hhmm(s.start)} → ${hhmm(s.end)}</summary><ol>`;
@@ -748,6 +759,12 @@ function renderResult(){
   $('results').querySelectorAll('button[data-pdf]').forEach(b=>b.onclick=e=>{e.stopPropagation();exportPDF([+b.dataset.pdf]);});
   $('results').querySelectorAll('tr[data-i]').forEach(tr=>tr.onclick=()=>highlight(+tr.dataset.i));
   $('pdfAll').onclick=()=>exportPDF(sched.map((_,i)=>i));
+  $('printAll').onclick=()=>printTickets(sched.map((_,i)=>i));
+  $('results').querySelectorAll('button[data-print]').forEach(b=>b.onclick=e=>{e.stopPropagation();printTickets([+b.dataset.print]);});
+  $('results').querySelectorAll('button[data-wa]').forEach(b=>b.onclick=e=>{e.stopPropagation();shareWA(+b.dataset.wa);});
+  $('results').querySelectorAll('button[data-copy]').forEach(b=>b.onclick=async e=>{e.stopPropagation();try{await navigator.clipboard.writeText(routeText(sched[+b.dataset.copy]));b.textContent='Copiado';setTimeout(()=>b.textContent='Copiar',1500);}catch(_){prompt('Copia el texto:',routeText(sched[+b.dataset.copy]));}});
+  const tels=store.get('tels',{});
+  $('results').querySelectorAll('input[data-tel]').forEach(inp=>{inp.value=tels[inp.dataset.tel]||'';inp.onclick=e=>e.stopPropagation();inp.onchange=()=>{const t=store.get('tels',{});t[inp.dataset.tel]=inp.value.trim();store.set('tels',t);};});
   $('xlsOut').onclick=exportXLSX;
   const uf=$('useFewer');if(uf)uf.onclick=()=>{$('drivers').value=R.fewer;store.set('f.drivers',String(R.fewer));optimize();};
   drawRoutes(sched);
@@ -784,46 +801,96 @@ function qrDataURL(text){
   return c.toDataURL('image/png');
 }
 function drawTicket(doc,R,cfg,draw){
-  const W=80,M=4,CW=72,lh=fs=>fs*0.3528*1.18;let y=4;
+  const W=80,CW=cfg.pw,M=(W-CW)/2,k=cfg.fs,lh=fs=>fs*0.3528*1.2;let y=3;
   const T=(s,x,yy,o)=>{if(draw)doc.text(pdfSafe(s),x,yy,o);};
-  const dash=yy=>{if(!draw)return;doc.setLineDashPattern([0.8,0.8],0);doc.setLineWidth(0.2);doc.line(M,yy,W-M,yy);doc.setLineDashPattern([],0);};
-  doc.setFont('helvetica','bold');doc.setFontSize(15);y+=lh(15);T('PACKATELAS',W/2,y,{align:'center'});
-  doc.setFontSize(13);y+=lh(13)+0.5;T(`RUTA ${R.num} de ${R.total}`,W/2,y,{align:'center'});
-  doc.setFont('helvetica','normal');doc.setFontSize(9);
+  const rule=(yy,w)=>{if(!draw)return;doc.setLineWidth(w||0.35);doc.setDrawColor(0);doc.line(M,yy,M+CW,yy);};
+  const F=(st,sz)=>{doc.setFont('helvetica',st);doc.setFontSize(sz*k);return sz*k;};
+  let z=F('bold',15);y+=lh(z);T('PACKATELAS',W/2,y,{align:'center'});
+  z=F('bold',13);y+=lh(z)+0.5;T(`RUTA ${R.num} de ${R.total}`,W/2,y,{align:'center'});
+  z=F('bold',9);
   const d=cfg.start.toLocaleDateString('es-MX',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
-  const lines=[`Fecha: ${d}`,`Salida: ${hhmm(R.start)} desde Lassaga 54, Col. Obrera`,`Paradas: ${R.stops.length} · Envíos: ${R.parcels} · ${R.km.toFixed(1)} km`];
-  y+=2;lines.forEach(l=>{y+=lh(9);T(l,M,y);});
-  doc.setFont('helvetica','bold');doc.setFontSize(10.5);y+=lh(10.5)+0.5;T(`Termina aprox: ${hhmm(R.end)}  (límite ${hhmm(R.deadline)})`,M,y);
-  doc.setFont('helvetica','normal');doc.setFontSize(9);y+=lh(9)+3;T('Repartidor: _______________________________',M,y);
-  y+=3;dash(y);y+=1;
-  R.stops.forEach((o,k)=>{
-    const top=y+1;const useQR=cfg.qr;const tw=useQR?CW-20:CW;let yy=top;
-    doc.setFont('helvetica','bold');doc.setFontSize(14);yy+=lh(14);T(String(k+1),M,yy);
-    doc.setFontSize(10.5);T(`Llega ~${hhmm(o.eta)}`,M+9,yy);
-    doc.setFontSize(9);
+  y+=1.5;[`Fecha: ${d}`,`Salida: ${hhmm(R.start)} desde Lassaga 54`,`Paradas: ${R.stops.length}  Envíos: ${R.parcels}  ${R.km.toFixed(1)} km`].forEach(l=>{doc.splitTextToSize(pdfSafe(l),CW).forEach(x=>{y+=lh(z);T(x,M,y);});});
+  z=F('bold',11);y+=lh(z)+0.5;T(`Termina aprox: ${hhmm(R.end)}`,M,y);
+  z=F('bold',9);y+=lh(z)+3;T('Repartidor: ____________________',M,y);
+  y+=2.5;rule(y,0.6);y+=0.5;
+  R.stops.forEach((o,i)=>{
+    const top=y+1;const qs=Math.min(20,CW*0.28);const useQR=cfg.qr;const tw=useQR?CW-qs-2:CW;let yy=top;
+    z=F('bold',15);yy+=lh(z);T(String(i+1),M,yy);
+    const z2=F('bold',11);T(`~${hhmm(o.eta)}`,M+(i+1>=10?11:8)*k,yy);
+    z=F('bold',9.5);
     const ids=doc.splitTextToSize(pdfSafe((o.st.parcels.length>1?`Envíos (${o.st.parcels.length}): `:'Envío: ')+o.st.parcels.map(p=>p.id).join(', ')),tw);
-    yy+=1;ids.forEach(l=>{yy+=lh(9);T(l,M,yy);});
-    doc.setFont('helvetica','normal');doc.setFontSize(8.5);
-    const dir=doc.splitTextToSize(pdfSafe(o.st.dir||`${o.st.lat.toFixed(5)}, ${o.st.lng.toFixed(5)}`),tw);
-    dir.forEach(l=>{yy+=lh(8.5);T(l,M,yy);});
+    yy+=1;ids.forEach(l=>{yy+=lh(z);T(l,M,yy);});
+    z=F('normal',9.5);
+    doc.splitTextToSize(pdfSafe(o.st.dir||`${o.st.lat.toFixed(5)}, ${o.st.lng.toFixed(5)}`),tw).forEach(l=>{yy+=lh(z);T(l,M,yy);});
     const refs=[...new Set(o.st.parcels.map(p=>p.ref).filter(Boolean))].join(' | ');
-    if(refs){doc.setFontSize(8);doc.splitTextToSize(pdfSafe(refs),tw).forEach(l=>{yy+=lh(8);T(l,M,yy);});}
-    doc.setFontSize(8);yy+=lh(8);T(`Espera: ${Math.round(o.svcMin)} min`,M,yy);
-    if(useQR&&draw){const url=`https://www.google.com/maps/search/?api=1&query=${o.st.lat.toFixed(6)},${o.st.lng.toFixed(6)}`;doc.addImage(qrDataURL(url),'PNG',W-M-18,top+0.5,18,18);}
-    y=Math.max(yy,useQR?top+19:yy)+2;dash(y);y+=0.5;
+    if(refs){z=F('normal',9);doc.splitTextToSize(pdfSafe(refs),tw).forEach(l=>{yy+=lh(z);T(l,M,yy);});}
+    z=F('bold',9);yy+=lh(z);T(`Espera: ${Math.round(o.svcMin)} min`,M,yy);
+    if(useQR&&draw)doc.addImage(qrDataURL(mapsURL(o.st)),'PNG',M+CW-qs,top+0.5,qs,qs);
+    y=Math.max(yy,useQR?top+qs+1:yy)+2;rule(y);y+=0.5;
   });
-  doc.setFont('helvetica','bold');doc.setFontSize(10);y+=lh(10)+2;T(`Fin estimado: ${hhmm(R.end)}`,M,y);
-  doc.setFont('helvetica','normal');doc.setFontSize(8);y+=lh(8)+4;T('Firma: _________________________________',M,y);
-  y+=lh(8)+1;T(`Generado ${new Date().toLocaleString('es-MX',{hour12:false})}`,M,y);
-  return y+5;
+  z=F('bold',11);y+=lh(z)+2;T(`Fin estimado: ${hhmm(R.end)}`,M,y);
+  z=F('bold',9);y+=lh(z)+5;T('Firma: ____________________',M,y);
+  z=F('normal',8);y+=lh(z)+1;T(`Generado ${new Date().toLocaleString('es-MX',{hour12:false})}`,M,y);
+  return y+8;
 }
 function exportPDF(idxs){
   const {jsPDF}=window.jspdf;const R=S.result;const sched=currentSched();const list=idxs.map(i=>sched[i]);
   const meas=new jsPDF({unit:'mm',format:[80,1000]});
-  const hs=list.map(r=>Math.max(90,Math.ceil(drawTicket(meas,r,R.cfg,false))));
+  const pc=printCfg();const hs=list.map(r=>Math.max(90,Math.ceil(drawTicket(meas,r,pc,false))));
   const doc=new jsPDF({unit:'mm',format:[80,hs[0]],orientation:'portrait'});
-  list.forEach((r,i)=>{if(i>0)doc.addPage([80,hs[i]],'portrait');drawTicket(doc,r,R.cfg,true);});
+  list.forEach((r,i)=>{if(i>0)doc.addPage([80,hs[i]],'portrait');drawTicket(doc,r,pc,true);});
   doc.save(list.length===1?`ruta_${list[0].num}_${R.cfg.date}.pdf`:`rutas_${R.cfg.date}.pdf`);
+}
+const mapsURL=st=>`https://www.google.com/maps/dir/?api=1&destination=${st.lat.toFixed(6)},${st.lng.toFixed(6)}`;
+function ticketHTML(R,cfg){
+  const k=cfg.fs,px=v=>(v*k).toFixed(1)+'pt';
+  const d=cfg.start.toLocaleDateString('es-MX',{weekday:'short',day:'2-digit',month:'short',year:'numeric'});
+  let h=`<section class="t"><div class="c b" style="font-size:${px(16)}">PACKATELAS</div><div class="c b" style="font-size:${px(14)}">RUTA ${R.num} de ${R.total}</div>
+  <div class="b" style="margin-top:4px">Fecha: ${esc(d)}<br>Salida: ${hhmm(R.start)} desde Lassaga 54<br>Paradas: ${R.stops.length} · Envíos: ${R.parcels} · ${R.km.toFixed(1)} km</div>
+  <div class="b" style="font-size:${px(12)};margin-top:3px">Termina aprox: ${hhmm(R.end)}</div>
+  <div class="b" style="margin:8px 0 4px">Repartidor: ____________________</div><hr class="thick">`;
+  R.stops.forEach((o,i)=>{
+    const refs=[...new Set(o.st.parcels.map(p=>p.ref).filter(Boolean))].join(' | ');
+    h+=`<div class="s">${cfg.qr?`<img class="qr" src="${qrDataURL(mapsURL(o.st))}">`:''}
+      <div><span class="b" style="font-size:${px(16)}">${i+1}</span> <span class="b" style="font-size:${px(12)}">~${hhmm(o.eta)}</span></div>
+      <div class="b">${o.st.parcels.length>1?`Envíos (${o.st.parcels.length}): `:'Envío: '}${esc(o.st.parcels.map(p=>p.id).join(', '))}</div>
+      <div>${esc(o.st.dir||(o.st.lat.toFixed(5)+', '+o.st.lng.toFixed(5)))}</div>
+      ${refs?`<div>${esc(refs)}</div>`:''}<div class="b">Espera: ${Math.round(o.svcMin)} min</div></div><hr>`;
+  });
+  h+=`<div class="b" style="font-size:${px(12)};margin-top:4px">Fin estimado: ${hhmm(R.end)}</div><div class="b" style="margin-top:14px">Firma: ____________________</div>
+  <div style="font-size:${px(8)};margin-top:4px">Generado ${new Date().toLocaleString('es-MX',{hour12:false})}</div><div style="height:12mm"></div></section>`;
+  return h;
+}
+function printCfg(){const c=readCfg();return Object.assign({},S.result.cfg,{pw:c.pw,fs:c.fs,qr:c.qr});}
+function printTickets(idxs){
+  const R=S.result,cfg=printCfg(),sched=currentSched();
+  const qs=Math.min(20,cfg.pw*0.28);
+  const css=`@page{size:80mm auto;margin:0}*{box-sizing:border-box}html,body{margin:0;padding:0;background:#fff}
+  body{width:${cfg.pw}mm;margin-left:${((80-cfg.pw)/2).toFixed(1)}mm;font-family:Arial,Helvetica,sans-serif;font-size:${(9.5*cfg.fs).toFixed(1)}pt;line-height:1.25;color:#000;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+  .t{width:100%;page-break-after:always;break-after:page;padding-top:2mm}.t:last-child{page-break-after:auto;break-after:auto}
+  .c{text-align:center}.b{font-weight:700}hr{border:0;border-top:1px solid #000;margin:4px 0}hr.thick{border-top:2px solid #000}
+  .s{overflow:hidden;padding:2px 0;min-height:${(cfg.qr?qs+1:0)}mm;word-wrap:break-word;overflow-wrap:anywhere}
+  .qr{float:right;width:${qs}mm;height:${qs}mm;margin-left:2mm;image-rendering:pixelated}`;
+  const html=`<!doctype html><html><head><meta charset="utf-8"><title>Tickets</title><style>${css}</style></head><body>${idxs.map(i=>ticketHTML(sched[i],cfg)).join('')}</body></html>`;
+  const old=document.getElementById('printFrame');if(old)old.remove();
+  const fr=document.createElement('iframe');fr.id='printFrame';fr.style.cssText='position:fixed;right:0;bottom:0;width:0;height:0;border:0';
+  document.body.appendChild(fr);const dc=fr.contentWindow.document;dc.open();dc.write(html);dc.close();
+  const go=()=>{fr.contentWindow.focus();fr.contentWindow.print();};
+  const imgs=[...dc.images];Promise.all(imgs.map(im=>im.complete?1:new Promise(r=>{im.onload=im.onerror=r;}))).then(()=>setTimeout(go,150));
+}
+function routeText(R){
+  let t=`*PACKATELAS · Ruta ${R.num} de ${R.total}*\n${R.start.toLocaleDateString('es-MX',{weekday:'long',day:'2-digit',month:'short'})}\nSalida ${hhmm(R.start)} desde Lassaga 54 · termina aprox ${hhmm(R.end)}\n${R.stops.length} paradas · ${R.parcels} envíos · ${R.km.toFixed(1)} km\n`;
+  R.stops.forEach((o,i)=>{
+    const refs=[...new Set(o.st.parcels.map(p=>p.ref).filter(Boolean))].join(' | ');
+    t+=`\n*${i+1}. ~${hhmm(o.eta)}* · ${o.st.parcels.map(p=>p.id).join(', ')}\n${o.st.dir||''}${refs?`\n${refs}`:''}\n${mapsURL(o.st)}\n`;
+  });
+  return t;
+}
+function shareWA(i){
+  const R=currentSched()[i];const txt=encodeURIComponent(routeText(R));
+  let tel=(store.get('tels',{})[i]||'').replace(/\D/g,'');if(tel.length===10)tel='52'+tel;
+  const url=tel?`https://web.whatsapp.com/send?phone=${tel}&text=${txt}`:`https://web.whatsapp.com/send?text=${txt}`;
+  window.open(url,'whatsapp');
 }
 function exportXLSX(){
   const R=S.result;const sched=currentSched();const rows=[];
