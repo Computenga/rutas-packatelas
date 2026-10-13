@@ -96,22 +96,34 @@ details.route li span{color:var(--muted)}
     <div class="card">
       <h2>1 · Envíos</h2>
       <input type="file" id="file" accept=".xlsx,.xls,.csv">
-      <div class="hint">Columnas: número de envío, dirección, latitud, longitud (y opcional: espera en min, referencia). <a href="#" id="tpl">Descargar plantilla</a></div>
+      <div class="hint">Reconoce tu log de Mercado Libre (Shipment, Dirección, Ciudad, CP, Latitud, Longitud, Destinatario, Estado ML) aunque cambie el orden de columnas. Si falta alguna obligatoria te pide mapearla. <a href="#" id="tpl">Plantilla simple</a></div>
       <div id="fileInfo" class="status"></div>
+      <a href="#" id="mapToggle" style="display:none;font-size:13px">Ver / cambiar columnas</a>
+      <div id="mapWarn" class="alert bad" style="display:none"></div>
       <div id="mapping">
         <div class="row">
-          <div><label>Nº de envío</label><select id="m_envio"></select></div>
-          <div><label>Dirección</label><select id="m_dir"></select></div>
+          <div><label>Nº de envío *</label><select id="m_envio"></select></div>
+          <div><label>Dirección *</label><select id="m_dir"></select></div>
         </div>
         <div class="row">
-          <div><label>Latitud</label><select id="m_lat"></select></div>
-          <div><label>Longitud</label><select id="m_lng"></select></div>
+          <div><label>Latitud *</label><select id="m_lat"></select></div>
+          <div><label>Longitud *</label><select id="m_lng"></select></div>
         </div>
         <div class="row">
-          <div><label>Espera (min, opcional)</label><select id="m_espera"></select></div>
-          <div><label>Referencia (opcional)</label><select id="m_ref"></select></div>
+          <div><label>Ciudad / municipio</label><select id="m_city"></select></div>
+          <div><label>Código postal</label><select id="m_cp"></select></div>
         </div>
+        <div class="row">
+          <div><label>Destinatario</label><select id="m_name"></select></div>
+          <div><label>Teléfono</label><select id="m_tel"></select></div>
+        </div>
+        <div class="row">
+          <div><label>Estado del envío</label><select id="m_estado"></select></div>
+          <div><label>Espera (min)</label><select id="m_espera"></select></div>
+        </div>
+        <div class="btns"><button type="button" id="mapReset">Volver a detectar</button></div>
       </div>
+      <label class="check"><input type="checkbox" id="skipDone" checked>Omitir entregados y cancelados (columna de estado)</label>
       <label class="check"><input type="checkbox" id="group" checked>Juntar envíos con las mismas coordenadas en una sola parada</label>
     </div>
 
@@ -353,19 +365,19 @@ function readCfg(){
   const date=$('date').value;const start=new Date(`${date}T${$('tStart').value}:00`),end=new Date(`${date}T${$('tEnd').value}:00`);
   return{date,start,end,K:Math.max(1,parseInt($('drivers').value)||1),wait:Math.max(0,parseFloat($('wait').value)||0),extra:Math.max(0,parseFloat($('extra').value)||0),
     group:$('group').checked,factor:parseFloat($('factor').value)||1.5,adj:parseFloat($('adj').value)||1,ttKey:$('ttKey').value.trim(),ttMode:$('ttMode').value,
-    ms:parseInt($('quality').value)||4000,qr:$('qr').checked,depot:{lat:parseFloat($('dLat').value),lng:parseFloat($('dLng').value)}};
+    ms:parseInt($('quality').value)||4000,qr:$('qr').checked,skipDone:$('skipDone').checked,depot:{lat:parseFloat($('dLat').value),lng:parseFloat($('dLng').value)}};
 }
 const PERSIST=['tStart','tEnd','drivers','wait','extra','ttKey','ttMode','adj','quality'];
 function loadSettings(){
   PERSIST.forEach(id=>{const v=store.get('f.'+id,null);if(v!==null)$(id).value=v;});
-  ['group','qr'].forEach(id=>{const v=store.get('f.'+id,null);if(v!==null)$(id).checked=v;});
+  ['group','qr','skipDone'].forEach(id=>{const v=store.get('f.'+id,null);if(v!==null)$(id).checked=v;});
   const d=store.get('depot',DEFAULT_DEPOT);$('dLat').value=d.lat.toFixed(6);$('dLng').value=d.lng.toFixed(6);
   const t=new Date();$('date').value=`${t.getFullYear()}-${String(t.getMonth()+1).padStart(2,'0')}-${String(t.getDate()).padStart(2,'0')}`;
   refreshFactor();
 }
 function bindSettings(){
   PERSIST.forEach(id=>$(id).addEventListener('change',()=>store.set('f.'+id,$(id).value)));
-  ['group','qr'].forEach(id=>$(id).addEventListener('change',()=>store.set('f.'+id,$(id).checked)));
+  ['group','qr','skipDone'].forEach(id=>$(id).addEventListener('change',()=>store.set('f.'+id,$(id).checked)));
   $('tStart').addEventListener('change',refreshFactor);
   $('factor').addEventListener('input',()=>{S.factorTouched=true;});
   ['dLat','dLng'].forEach(id=>$(id).addEventListener('change',()=>setDepot(parseFloat($('dLat').value),parseFloat($('dLng').value))));
@@ -389,35 +401,63 @@ function setDepot(lat,lng){
 }
 
 // ===== Excel =====
-function detectCol(h,kind){
-  const n=h.map(norm);const f=fn=>n.findIndex(fn);
-  switch(kind){
-    case'envio':{let i=f(s=>/envio|guia|tracking|pedido|folio|paquete/.test(s));if(i<0)i=f(s=>s==='id'||s==='numero'||s==='orden'||s==='no');return i;}
-    case'dir':return f(s=>/direccion|domicilio|address|calle/.test(s));
-    case'lat':return f(s=>s.startsWith('lat'));
-    case'lng':return f(s=>s.startsWith('lng')||s.startsWith('lon'));
-    case'espera':return f(s=>/espera|servicio|minutos|tiempo/.test(s));
-    case'ref':return f(s=>/referencia|telefono|tel|nota|cliente|destinatario|nombre/.test(s));
-  }
-  return-1;
+const FIELDS=[
+  {id:'m_envio',k:'envio',req:1,exact:['shipment','envio','numerodeenvio','noenvio','guia','tracking','idenvio'],re:/^(shipment|envio|guia|tracking|pedido|folio|paquete)/},
+  {id:'m_dir',k:'dir',req:1,exact:['direccion','domicilio','address','calle'],re:/direccion|domicilio|address|calle/},
+  {id:'m_lat',k:'lat',req:1,exact:['latitud','latitude','lat'],re:/^lat/},
+  {id:'m_lng',k:'lng',req:1,exact:['longitud','longitude','lng','lon','long'],re:/^(lng|lon)/},
+  {id:'m_city',k:'city',exact:['ciudad','municipio','alcaldia','delegacion','city'],re:/^(ciudad|municipio|alcaldia|delegacion)/},
+  {id:'m_cp',k:'cp',exact:['cp','codigopostal','zip','zipcode'],re:/^(cp|codigopostal|zip)/},
+  {id:'m_name',k:'name',exact:['destinatario','cliente','nombre','receptor'],re:/^(destinatario|cliente|nombre|receptor)/},
+  {id:'m_tel',k:'tel',exact:['telefono','tel','celular','phone'],re:/^(telefono|tel|celular|phone)/},
+  {id:'m_estado',k:'estado',exact:['estadoml','status','estatus','estadoenvio'],re:/^(estadoml|estatus|status)$/},
+  {id:'m_espera',k:'espera',exact:['espera','esperamin','tiempoespera','minutosespera'],re:/^(espera|tiempoespera)/}
+];
+function detectCol(h,F){
+  const n=h.map(norm);
+  for(const e of F.exact){const i=n.indexOf(e);if(i>=0)return i;}
+  return n.findIndex(s=>F.re.test(s));
 }
-function fillMapping(){
+function fillMapping(force){
+  const saved=force?{}:store.get('mapByName',{});
   const opts=['<option value="-1">— ninguna —</option>'].concat(S.headers.map((h,i)=>`<option value="${i}">${esc(h||('Columna '+(i+1)))}</option>`)).join('');
-  [['m_envio','envio'],['m_dir','dir'],['m_lat','lat'],['m_lng','lng'],['m_espera','espera'],['m_ref','ref']].forEach(([id,k])=>{$(id).innerHTML=opts;$(id).value=String(detectCol(S.headers,k));$(id).onchange=()=>{S.matrix=null;previewStops();};});
-  $('mapping').style.display='block';
+  FIELDS.forEach(F=>{
+    const el=$(F.id);el.innerHTML=opts;
+    let i=saved[F.k]?S.headers.indexOf(saved[F.k]):-1;
+    if(i<0)i=detectCol(S.headers,F);
+    el.value=String(i);
+    el.onchange=()=>{const m=store.get('mapByName',{});const v=parseInt(el.value);m[F.k]=v>=0?S.headers[v]:'';store.set('mapByName',m);S.matrix=null;checkMapping();previewStops();updateFileInfo();};
+  });
+  checkMapping();
 }
-function getMap(){const g=id=>parseInt($(id).value);return{envio:g('m_envio'),dir:g('m_dir'),lat:g('m_lat'),lng:g('m_lng'),espera:g('m_espera'),ref:g('m_ref')};}
+function checkMapping(){
+  const miss=FIELDS.filter(F=>F.req&&parseInt($(F.id).value)<0).map(F=>$(F.id).closest('div').querySelector('label').textContent.replace(' *',''));
+  const w=$('mapWarn');
+  if(miss.length){w.style.display='block';w.innerHTML=`No encontré estas columnas: <b>${esc(miss.join(', '))}</b>. Elígelas abajo; se recordarán para los siguientes archivos.`;$('mapping').style.display='block';}
+  else{w.style.display='none';$('mapping').style.display=store.get('showMap',false)?'block':'none';}
+  FIELDS.forEach(F=>{$(F.id).style.borderColor=F.req&&parseInt($(F.id).value)<0?'var(--bad)':'';});
+  return!miss.length;
+}
+function getMap(){const m={};FIELDS.forEach(F=>m[F.k]=parseInt($(F.id).value));return m;}
+const DONE_STATES=/^(delivered|cancelled|canceled|entregado|cancelado|not_delivered)$/i;
+const cell=(r,i)=>{if(i<0)return'';const v=String(r[i]??'').trim();return v==='-'?'':v;};
 function buildStops(cfg){
   const m=getMap();if(m.lat<0||m.lng<0)throw new Error('Selecciona las columnas de latitud y longitud.');
-  const bad=[],parcels=[],outside=[];
+  const bad=[],parcels=[],outside=[],skipped=[],dups=[];const seen=new Set();
   S.rows.forEach((r,i)=>{
+    const id=cell(r,m.envio)||('Fila '+(i+2));
+    if(cfg.skipDone&&m.estado>=0&&DONE_STATES.test(cell(r,m.estado))){skipped.push(id);return;}
+    if(m.envio>=0&&seen.has(id)){dups.push(id);return;}seen.add(id);
     let lat=parseNum(r[m.lat]),lng=parseNum(r[m.lng]);
-    const id=(m.envio>=0?String(r[m.envio]??'').trim():'')||('Fila '+(i+2));
     if(!isFinite(lat)||!isFinite(lng)||(lat===0&&lng===0)){bad.push(id);return;}
     if(Math.abs(lat)>60&&Math.abs(lng)<60){const t=lat;lat=lng;lng=t;}
     if(lat<18.8||lat>20.4||lng<-100||lng>-98.4)outside.push(id);
+    const city=cell(r,m.city),cp=cell(r,m.cp);
+    const dir=[cell(r,m.dir),city,cp?('CP '+cp):''].filter(Boolean).join(', ');
+    const tel=cell(r,m.tel);const telOk=tel&&/\d{6,}/.test(tel.replace(/\D/g,''))?tel:'';
+    const ref=[cell(r,m.name),telOk?('Tel '+telOk):''].filter(Boolean).join(' · ');
     const esp=m.espera>=0?parseNum(r[m.espera]):NaN;
-    parcels.push({id,dir:m.dir>=0?String(r[m.dir]??'').trim():'',ref:m.ref>=0?String(r[m.ref]??'').trim():'',lat,lng,esp});
+    parcels.push({id,dir,ref,lat,lng,esp});
   });
   const stops=[],byKey=new Map();
   for(const p of parcels){
@@ -431,7 +471,12 @@ function buildStops(cfg){
     const base=explicit.length?Math.max(...explicit):cfg.wait;
     s.svcMin=base+cfg.extra*(s.parcels.length-1);
   }
-  return{stops,bad,outside,parcelCount:parcels.length};
+  return{stops,bad,outside,skipped,dups,parcelCount:parcels.length};
+}
+function updateFileInfo(){
+  try{const {stops,bad,skipped,dups,parcelCount}=buildStops(readCfg());
+    $('fileInfo').textContent=`${S.fileName}: ${parcelCount} envíos a rutear en ${stops.length} paradas`+(skipped.length?` · ${skipped.length} entregados/cancelados omitidos`:'')+(dups.length?` · ${dups.length} duplicados omitidos`:'')+(bad.length?` · ${bad.length} sin coordenadas`:'');
+  }catch(e){$('fileInfo').textContent=`${S.fileName}: ${S.rows.length} filas · falta mapear columnas`;}
 }
 function previewStops(){
   previewLayer.clearLayers();
@@ -450,17 +495,15 @@ async function onFile(e){
     S.headers=(aoa[h]||[]).map(c=>String(c).trim());
     S.rows=aoa.slice(h+1).filter(r=>r.some(c=>String(c).trim()!==''));
     S.matrix=null;S.result=null;
-    fillMapping();
-    const {stops,bad,parcelCount}=buildStops(readCfg());
-    $('fileInfo').textContent=`${f.name}: ${parcelCount} envíos en ${stops.length} paradas`+(bad.length?` · ${bad.length} sin coordenadas`:'');
+    S.fileName=f.name;$('mapToggle').style.display='inline';fillMapping(false);updateFileInfo();
     previewStops();routeLayer.clearLayers();
   }catch(err){$('fileInfo').textContent='No se pudo leer el archivo: '+err.message;}
 }
 function downloadTemplate(e){
   e.preventDefault();
-  const ws=XLSX.utils.aoa_to_sheet([['Envio','Direccion','Latitud','Longitud','Espera_min','Referencia'],
-    ['45012345678','Av. Insurgentes Sur 1235, Col. Del Valle, Benito Juárez',19.3741,-99.1781,'','Tel 55 0000 0000'],
-    ['45012345679','Calz. de Tlalpan 3000, Coyoacán',19.3301,-99.1412,15,'Entregar en caseta']]);
+  const ws=XLSX.utils.aoa_to_sheet([['Shipment','Destinatario','Teléfono','Dirección','Ciudad','CP','Latitud','Longitud','Estado ML','Espera'],
+    ['45012345678','Nombre Apellido','5500000000','Av. Insurgentes Sur 1235','Benito Juárez','03100',19.3741,-99.1781,'ready_to_ship',''],
+    ['45012345679','Nombre Apellido','','Calz. de Tlalpan 3000','Coyoacán','04220',19.3301,-99.1412,'ready_to_ship',15]]);
   const wb=XLSX.utils.book_new();XLSX.utils.book_append_sheet(wb,ws,'Envios');XLSX.writeFile(wb,'plantilla_rutas.xlsx');
 }
 
@@ -565,8 +608,11 @@ async function optimize(){
     const cfg=readCfg();
     if(!isFinite(cfg.depot.lat)||!isFinite(cfg.depot.lng))throw new Error('Revisa las coordenadas del origen.');
     if(!(cfg.end>cfg.start))throw new Error('La hora máxima de término debe ser después de la hora de salida.');
-    const {stops,bad,outside,parcelCount}=buildStops(cfg);
+    if(!checkMapping())throw new Error('Faltan columnas por mapear (marcadas en rojo).');
+    const {stops,bad,outside,skipped,dups,parcelCount}=buildStops(cfg);
     if(!stops.length)throw new Error('No hay envíos con coordenadas válidas.');
+    if(skipped.length)warnings.push(`${skipped.length} envío(s) entregados o cancelados no se rutearon.`);
+    if(dups.length)warnings.push(`${dups.length} envío(s) repetidos en el archivo se tomaron una sola vez: ${dups.slice(0,8).join(', ')}`);
     if(bad.length)warnings.push(`${bad.length} envío(s) sin coordenadas válidas quedaron fuera: ${bad.slice(0,12).join(', ')}${bad.length>12?'…':''}`);
     if(outside.length)warnings.push(`${outside.length} envío(s) con coordenadas fuera de CDMX/Edomex (revísalas): ${outside.slice(0,8).join(', ')}${outside.length>8?'…':''}`);
     const pts=[cfg.depot,...stops];const n=stops.length;
@@ -801,7 +847,10 @@ loadSettings();bindSettings();initMap();
 $('file').addEventListener('change',onFile);
 $('tpl').addEventListener('click',downloadTemplate);
 $('run').addEventListener('click',optimize);
-$('group').addEventListener('change',()=>{S.matrix=null;previewStops();});
+$('group').addEventListener('change',()=>{S.matrix=null;previewStops();updateFileInfo();});
+$('skipDone').addEventListener('change',()=>{S.matrix=null;previewStops();updateFileInfo();});
+$('mapReset').addEventListener('click',()=>{store.set('mapByName',{});fillMapping(true);S.matrix=null;previewStops();updateFileInfo();});
+$('mapToggle').addEventListener('click',e=>{e.preventDefault();const on=$('mapping').style.display!=='block';$('mapping').style.display=on?'block':'none';store.set('showMap',on);});
 $('geoDepot').addEventListener('click',geocodeDepot);
 $('moveDepot').addEventListener('click',()=>{S.moveDepot=!S.moveDepot;$('moveDepot').textContent=S.moveDepot?'Haz clic en el mapa…':'Mover en el mapa';map.getContainer().style.cursor=S.moveDepot?'crosshair':'';});
 </script>
